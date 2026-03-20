@@ -8,6 +8,10 @@ import requests
 
 WIKI_API = "https://warframe.fandom.com/api.php"
 WFM_BASE_V2 = "https://api.warframe.market/v2"
+WFM_BASE_V1_FALLBACKS = [
+    "https://api.warframe.market/v1",
+    "https://warframe.market/api/v1",
+]
 
 REFINEMENT_PROBS: Dict[str, Dict[str, float]] = {
     "intact": {"common": 25.33, "uncommon": 11.0, "rare": 2.0},
@@ -257,26 +261,110 @@ def _collect_slug_candidates(obj: Any, out: List[Tuple[Optional[str], str]]) -> 
             _collect_slug_candidates(x, out)
 
 
+def _collect_item_pairs(obj: Any, out: Dict[str, str]) -> None:
+    if isinstance(obj, dict):
+        item_name = obj.get("item_name")
+        url_name = obj.get("url_name")
+        if isinstance(item_name, str) and isinstance(url_name, str):
+            out[normalize_item_key(item_name)] = url_name
+        for v in obj.values():
+            _collect_item_pairs(v, out)
+        return
+
+    if isinstance(obj, list):
+        for x in obj:
+            _collect_item_pairs(x, out)
+
+
+def _build_v2_items_index(payload: Any) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if not isinstance(payload, dict):
+        return out
+
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return out
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        slug = item.get("slug")
+        i18n = item.get("i18n")
+        if not isinstance(slug, str) or not isinstance(i18n, dict):
+            continue
+
+        lang_entry = i18n.get("en")
+        name = lang_entry.get("name") if isinstance(lang_entry, dict) else None
+        if isinstance(name, str):
+            out[normalize_item_key(name)] = slug
+
+    return out
+
+
+def get_items_index(session: requests.Session, timeout_s: float = 12.0) -> Dict[str, str]:
+    urls = [f"{WFM_BASE_V2}/items"]
+    for base in WFM_BASE_V1_FALLBACKS:
+        urls.extend([
+            f"{base}/items",
+            f"{base}/items?include=item_name,url_name",
+            f"{base}/items/list",
+            f"{base}/tools/items",
+        ])
+
+    for url in urls:
+        try:
+            resp = session.get(url, timeout=timeout_s)
+        except requests.RequestException:
+            continue
+
+        if resp.status_code != 200:
+            continue
+
+        try:
+            body = resp.json()
+        except Exception:
+            continue
+
+        if url.endswith("/v2/items"):
+            parsed = _build_v2_items_index(body)
+        else:
+            parsed: Dict[str, str] = {}
+            _collect_item_pairs(body, parsed)
+
+        if parsed:
+            return parsed
+
+    return {}
+
+
 def wfm_search_url_name(session: requests.Session, item_name: str, timeout_s: float = 12.0) -> Optional[str]:
     query = item_name.lower().strip()
     target = normalize_item_key(item_name)
-    url = f"{WFM_BASE_V2}/items/search/{quote(query)}"
+    urls = [f"{WFM_BASE_V2}/items/search/{quote(query)}"]
+    for base in WFM_BASE_V1_FALLBACKS:
+        urls.append(f"{base}/items/search/{quote(query)}")
 
-    response = session.get(url, timeout=timeout_s)
-    if response.status_code != 200:
-        return None
+    for url in urls:
+        try:
+            response = session.get(url, timeout=timeout_s)
+            if response.status_code != 200:
+                continue
+            body = response.json()
+        except Exception:
+            continue
 
-    body = response.json()
-    candidates: List[Tuple[Optional[str], str]] = []
-    _collect_slug_candidates(body, candidates)
-    if not candidates:
-        return None
+        candidates: List[Tuple[Optional[str], str]] = []
+        _collect_slug_candidates(body, candidates)
+        if not candidates:
+            continue
 
-    for name, slug in candidates:
-        if isinstance(name, str) and normalize_item_key(name) == target:
-            return slug
+        for name, slug in candidates:
+            if isinstance(name, str) and normalize_item_key(name) == target:
+                return slug
 
-    return candidates[0][1]
+        return candidates[0][1]
+
+    return None
 
 
 def wfm_lowest_sell_price(
@@ -285,14 +373,35 @@ def wfm_lowest_sell_price(
     status_filter: str = "ingame",
     timeout_s: float = 10.0,
 ) -> Optional[float]:
-    url = f"{WFM_BASE_V2}/orders/item/{url_name}"
-    response = session.get(url, timeout=timeout_s)
-    if response.status_code != 200:
-        return None
+    orders: List[Dict[str, Any]] = []
 
-    body = response.json()
-    orders = body.get("data", [])
-    if not isinstance(orders, list):
+    try:
+        url = f"{WFM_BASE_V2}/orders/item/{url_name}"
+        response = session.get(url, timeout=timeout_s)
+        if response.status_code == 200:
+            body = response.json()
+            parsed = body.get("data", [])
+            if isinstance(parsed, list):
+                orders = parsed
+    except requests.RequestException:
+        pass
+
+    if not orders:
+        for base in WFM_BASE_V1_FALLBACKS:
+            try:
+                url = f"{base}/items/{url_name}/orders"
+                response = session.get(url, timeout=timeout_s)
+                if response.status_code != 200:
+                    continue
+                body = response.json()
+                parsed = body.get("payload", {}).get("orders", [])
+                if isinstance(parsed, list):
+                    orders = parsed
+                    break
+            except requests.RequestException:
+                continue
+
+    if not orders:
         return None
 
     candidates: List[float] = []
@@ -326,6 +435,7 @@ def compute_prices_and_ev(
     crossplay: bool = True,
 ) -> Tuple[List[Dict[str, Any]], float]:
     session = new_wfm_session(crossplay=crossplay)
+    item_index = get_items_index(session, timeout_s=timeout_s)
     slug_cache: Dict[str, Optional[str]] = {}
     price_cache: Dict[str, Optional[float]] = {}
     rows: List[Dict[str, Any]] = []
@@ -342,7 +452,10 @@ def compute_prices_and_ev(
                 price = FIXED_PRICE_BY_ITEM_KEY[item_key]
             else:
                 if item_key not in slug_cache:
-                    slug_cache[item_key] = wfm_search_url_name(session, base_name, timeout_s=timeout_s)
+                    slug = item_index.get(item_key)
+                    if not slug:
+                        slug = wfm_search_url_name(session, base_name, timeout_s=timeout_s)
+                    slug_cache[item_key] = slug
                 slug = slug_cache[item_key]
 
                 if isinstance(slug, str):
