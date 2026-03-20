@@ -209,6 +209,7 @@ const I18N = {
 };
 
 let currentLang = localStorage.getItem('ui_lang') || 'zh_CN';
+let lastResult = null;
 
 function t(key) {
   return (I18N[currentLang] && I18N[currentLang][key]) || key;
@@ -236,11 +237,9 @@ function applyLanguage() {
   const relicInput = document.getElementById('relic');
   relicInput.placeholder = currentLang === 'zh_CN' ? '例如: 中纪A6 / Meso A6' : 'e.g. Meso A6 / 中纪A6';
   document.getElementById('langSelect').value = currentLang;
-
-  document.querySelectorAll('td[data-rarity]').forEach((td) => {
-    const raw = td.getAttribute('data-rarity') || '';
-    td.textContent = rarityLabel(raw);
-  });
+  if (lastResult) {
+    renderResult(lastResult);
+  }
 }
 
 function onLanguageChange() {
@@ -252,6 +251,45 @@ function onLanguageChange() {
 function toggleSettings() {
   const panel = document.getElementById('settingsPanel');
   panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
+}
+
+function pickRelicName(data) {
+  if (currentLang === 'zh_CN') {
+    return data.relic_zh || data.relic_display || data.relic;
+  }
+  return data.relic_en || data.relic_display || data.relic;
+}
+
+function pickItemName(row) {
+  if (currentLang === 'zh_CN') {
+    return row.item_zh || row.item_display || row.item;
+  }
+  return row.item_en || row.item_display || row.item;
+}
+
+function renderResult(data) {
+  const summary = document.getElementById('summary');
+  const table = document.getElementById('table');
+  const tbody = table.querySelector('tbody');
+  tbody.innerHTML = '';
+
+  summary.textContent = t('summary')
+    .replace('{relic}', pickRelicName(data))
+    .replace('{vault}', vaultLabel(data.vault_status))
+    .replace('{ev}', data.ev);
+
+  for (const row of data.drops) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td data-rarity="${row.rarity}">${rarityLabel(row.rarity)}</td>
+      <td>${row.prob}</td>
+      <td>${row.price === null ? t('na') : row.price}</td>
+      <td>${row.value === null ? t('na') : row.value.toFixed(4)}</td>
+      <td>${pickItemName(row)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+  table.style.display = '';
 }
 
 async function queryEv() {
@@ -269,7 +307,7 @@ async function queryEv() {
   queryBtn.disabled = true;
 
   try {
-    const url = `/api/ev?relic=${encodeURIComponent(relic)}&refinement=${encodeURIComponent(refinement)}&status=${encodeURIComponent(status)}`;
+    const url = `/api/ev?relic=${encodeURIComponent(relic)}&refinement=${encodeURIComponent(refinement)}&status=${encodeURIComponent(status)}&lang=${encodeURIComponent(currentLang)}`;
     const resp = await fetch(url);
     const data = await resp.json();
 
@@ -278,23 +316,8 @@ async function queryEv() {
       return;
     }
 
-    summary.textContent = t('summary')
-      .replace('{relic}', data.relic)
-      .replace('{vault}', vaultLabel(data.vault_status))
-      .replace('{ev}', data.ev);
-
-    for (const row of data.drops) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td data-rarity="${row.rarity}">${rarityLabel(row.rarity)}</td>
-        <td>${row.prob}</td>
-        <td>${row.price === null ? t('na') : row.price}</td>
-        <td>${row.value === null ? t('na') : row.value.toFixed(4)}</td>
-        <td>${row.item}</td>
-      `;
-      tbody.appendChild(tr);
-    }
-    table.style.display = '';
+    lastResult = data;
+    renderResult(data);
   } catch (err) {
     summary.textContent = `${t('error')}: ${err}`;
   } finally {
@@ -324,9 +347,10 @@ def get_ev(
     relic: str = Query(..., description="Relic name, e.g. Meso A6"),
     refinement: str = Query("radiant", pattern="^(intact|exceptional|flawless|radiant)$"),
     status: str = Query("ingame", pattern="^(ingame|online|any)$"),
+    lang: str = Query("en_US", pattern="^(zh_CN|en_US)$"),
 ) -> JSONResponse:
     try:
-        result = calculate_relic_ev(relic_name=relic, refinement=refinement, status_filter=status)
+        result = calculate_relic_ev(relic_name=relic, refinement=refinement, status_filter=status, lang=lang)
         return JSONResponse({"ok": True, **result})
     except Exception as exc:
         return JSONResponse(status_code=400, content={"ok": False, "error": str(exc)})

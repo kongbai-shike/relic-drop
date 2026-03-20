@@ -1,4 +1,5 @@
 import re
+import time
 from html import unescape
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -34,9 +35,21 @@ ERA_ALIASES = {
     "赤毒": "Requiem",
 }
 
+ERA_DISPLAY_ALIASES = {
+    "Lith": "古纪",
+    "Meso": "前纪",
+    "Neo": "中纪",
+    "Axi": "后纪",
+    "Requiem": "赤毒",
+}
+
 FIXED_PRICE_BY_ITEM_KEY = {
     "forma blueprint": 1.0,
 }
+
+_I18N_NAME_CACHE: Dict[str, str] = {}
+_I18N_NAME_CACHE_AT = 0.0
+_I18N_NAME_CACHE_TTL_S = 12 * 3600
 
 
 def normalize_relic_name(value: str) -> str:
@@ -217,6 +230,77 @@ def split_item_quantity(item_name: str) -> Tuple[str, int]:
     if not core:
         return s, 1
     return core, qty
+
+
+def localize_relic_name(relic_name: str, lang: str = "en_US") -> str:
+    normalized = normalize_relic_name(relic_name)
+    if lang != "zh_CN":
+        return normalized
+
+    parts = normalized.split()
+    if len(parts) < 2:
+        return normalized
+    era = parts[0]
+    code = " ".join(parts[1:])
+    zh_era = ERA_DISPLAY_ALIASES.get(era, era)
+    return f"{zh_era}{code}"
+
+
+def _build_v2_items_name_map(payload: Any, target_lang: str = "zh-hans") -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if not isinstance(payload, dict):
+        return out
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return out
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        i18n = item.get("i18n")
+        if not isinstance(i18n, dict):
+            continue
+        en_entry = i18n.get("en")
+        zh_entry = i18n.get(target_lang)
+        en_name = en_entry.get("name") if isinstance(en_entry, dict) else None
+        zh_name = zh_entry.get("name") if isinstance(zh_entry, dict) else None
+        if isinstance(en_name, str) and isinstance(zh_name, str) and en_name.strip() and zh_name.strip():
+            out[normalize_item_key(en_name)] = zh_name.strip()
+    return out
+
+
+def get_item_name_map_zh(session: requests.Session, timeout_s: float = 12.0) -> Dict[str, str]:
+    global _I18N_NAME_CACHE, _I18N_NAME_CACHE_AT
+    now = time.time()
+    if _I18N_NAME_CACHE and (now - _I18N_NAME_CACHE_AT) < _I18N_NAME_CACHE_TTL_S:
+        return _I18N_NAME_CACHE
+
+    url = f"{WFM_BASE_V2}/items"
+    try:
+        resp = session.get(url, timeout=timeout_s, headers={"Language": "zh-hans"})
+        resp.raise_for_status()
+        name_map = _build_v2_items_name_map(resp.json(), target_lang="zh-hans")
+        if name_map:
+            _I18N_NAME_CACHE = name_map
+            _I18N_NAME_CACHE_AT = now
+            return name_map
+    except Exception:
+        pass
+    return _I18N_NAME_CACHE
+
+
+def localize_item_name(item_name: str, lang: str, zh_name_map: Optional[Dict[str, str]] = None) -> str:
+    if lang != "zh_CN":
+        return item_name
+
+    base_name, qty = split_item_quantity(item_name)
+    key = normalize_item_key(base_name)
+    zh_base = (zh_name_map or {}).get(key)
+    if not zh_base:
+        return item_name
+    if qty > 1:
+        return f"{qty} x {zh_base}"
+    return zh_base
 
 
 def new_wfm_session(crossplay: bool = True) -> requests.Session:
@@ -490,6 +574,7 @@ def calculate_relic_ev(
     relic_name: str,
     refinement: str = "radiant",
     status_filter: str = "ingame",
+    lang: str = "en_US",
     timeout_s: float = 20.0,
 ) -> Dict[str, Any]:
     normalized = normalize_relic_name(relic_name)
@@ -502,8 +587,28 @@ def calculate_relic_ev(
         crossplay=True,
     )
 
+    zh_map: Dict[str, str] = {}
+    if lang == "zh_CN":
+        s = new_wfm_session(crossplay=True)
+        try:
+            zh_map = get_item_name_map_zh(s, timeout_s=timeout_s)
+        finally:
+            s.close()
+
+    for row in rows:
+        item_en = str(row.get("item", ""))
+        row["item_en"] = item_en
+        row["item_zh"] = localize_item_name(item_en, "zh_CN", zh_name_map=zh_map)
+        row["item_display"] = row["item_zh"] if lang == "zh_CN" else row["item_en"]
+
+    relic_en = normalized
+    relic_zh = localize_relic_name(normalized, "zh_CN")
+
     return {
-        "relic": normalized,
+        "relic": relic_en,
+        "relic_en": relic_en,
+        "relic_zh": relic_zh,
+        "relic_display": relic_zh if lang == "zh_CN" else relic_en,
         "refinement": refinement,
         "status_filter": status_filter,
         "vault_status": vault_status,
