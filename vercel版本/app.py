@@ -166,6 +166,7 @@ const I18N = {
     error: '错误',
     summary: '{relic} | 状态: {vault} | EV: {ev}p',
     vault_label: { vaulted: '入库', active: '出库', unknown: '未知' },
+    rarity_label: { common: '普通', uncommon: '罕见', rare: '稀有' },
     col_rarity: '稀有度',
     col_prob: '概率%',
     col_price: '价格(p)',
@@ -190,6 +191,7 @@ const I18N = {
     error: 'Error',
     summary: '{relic} | vault: {vault} | EV: {ev}p',
     vault_label: { vaulted: 'Vaulted', active: 'Active', unknown: 'Unknown' },
+    rarity_label: { common: 'common', uncommon: 'uncommon', rare: 'rare' },
     col_rarity: 'Rarity',
     col_prob: 'Prob%',
     col_price: 'Price(p)',
@@ -217,6 +219,11 @@ function vaultLabel(code) {
   return m[code] || m.unknown || code;
 }
 
+function rarityLabel(code) {
+  const m = I18N[currentLang].rarity_label || {};
+  return m[code] || code;
+}
+
 function applyLanguage() {
   document.documentElement.lang = currentLang === 'zh_CN' ? 'zh-CN' : 'en';
   document.querySelectorAll('[data-i18n]').forEach((el) => {
@@ -229,6 +236,11 @@ function applyLanguage() {
   const relicInput = document.getElementById('relic');
   relicInput.placeholder = currentLang === 'zh_CN' ? '例如: 中纪A6 / Meso A6' : 'e.g. Meso A6 / 中纪A6';
   document.getElementById('langSelect').value = currentLang;
+
+  document.querySelectorAll('td[data-rarity]').forEach((td) => {
+    const raw = td.getAttribute('data-rarity') || '';
+    td.textContent = rarityLabel(raw);
+  });
 }
 
 function onLanguageChange() {
@@ -274,7 +286,7 @@ async function queryEv() {
     for (const row of data.drops) {
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${row.rarity}</td>
+        <td data-rarity="${row.rarity}">${rarityLabel(row.rarity)}</td>
         <td>${row.prob}</td>
         <td>${row.price === null ? t('na') : row.price}</td>
         <td>${row.value === null ? t('na') : row.value.toFixed(4)}</td>
